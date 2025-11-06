@@ -1,8 +1,11 @@
 import os
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
+from typing import Literal
+from database import create_document
 
-app = FastAPI()
+app = FastAPI(title="Flames Backend", version="1.0.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -14,58 +17,121 @@ app.add_middleware(
 
 @app.get("/")
 def read_root():
-    return {"message": "Hello from FastAPI Backend!"}
+    return {"message": "Flames Backend Running"}
 
-@app.get("/api/hello")
-def hello():
-    return {"message": "Hello from the backend API!"}
+class FlamesRequest(BaseModel):
+    name_a: str = Field(..., min_length=1)
+    name_b: str = Field(..., min_length=1)
+    source: Literal["web", "mobile", "bot", "other"] = "web"
+
+class FlamesResponse(BaseModel):
+    name_a: str
+    name_b: str
+    count: int
+    result: str
+
+FLAMES_MAP = [
+    ("F", "Friends"),
+    ("L", "Love"),
+    ("A", "Affection"),
+    ("M", "Marriage"),
+    ("E", "Enemies"),
+    ("S", "Siblings"),
+]
+
+letters = [k for k, _ in FLAMES_MAP]
+full = {k: v for k, v in FLAMES_MAP}
+
+
+def flames_count(a: str, b: str) -> int:
+    """Classic FLAMES letter elimination count."""
+    a = ''.join(ch.lower() for ch in a if ch.isalpha())
+    b = ''.join(ch.lower() for ch in b if ch.isalpha())
+    # remove common letters
+    a_list = list(a)
+    b_list = list(b)
+    i = 0
+    while i < len(a_list):
+        ch = a_list[i]
+        if ch in b_list:
+            a_list.pop(i)
+            b_list.remove(ch)
+        else:
+            i += 1
+    return len(a_list) + len(b_list)
+
+
+def flames_result(count: int) -> str:
+    arr = letters.copy()
+    idx = 0
+    while len(arr) > 1 and count > 0:
+        idx = (idx + count - 1) % len(arr)
+        arr.pop(idx)
+    return full[arr[0]] if arr else "Unknown"
+
+
+@app.post("/api/flames", response_model=FlamesResponse)
+async def calculate_flames(payload: FlamesRequest, request: Request):
+    c = flames_count(payload.name_a, payload.name_b)
+    result = flames_result(c)
+
+    # Log to database for analytics (best-effort)
+    try:
+        ua = request.headers.get("user-agent")
+        create_document(
+            "calculationlog",
+            {
+                "name_a": payload.name_a.strip(),
+                "name_b": payload.name_b.strip(),
+                "count": c,
+                "result": result,
+                "source": payload.source,
+                "user_agent": ua,
+            },
+        )
+    except Exception:
+        # If database isn't configured, we still return the result
+        pass
+
+    return FlamesResponse(name_a=payload.name_a, name_b=payload.name_b, count=c, result=result)
+
 
 @app.get("/test")
 def test_database():
-    """Test endpoint to check if database is available and accessible"""
+    """Connectivity quick check"""
     response = {
         "backend": "✅ Running",
         "database": "❌ Not Available",
         "database_url": None,
         "database_name": None,
         "connection_status": "Not Connected",
-        "collections": []
+        "collections": [],
     }
-    
+
     try:
-        # Try to import database module
         from database import db
-        
+
         if db is not None:
             response["database"] = "✅ Available"
-            response["database_url"] = "✅ Configured"
-            response["database_name"] = db.name if hasattr(db, 'name') else "✅ Connected"
+            response["database_url"] = "✅ Set" if os.getenv("DATABASE_URL") else "❌ Not Set"
+            response["database_name"] = getattr(db, "name", None) or "✅ Connected"
             response["connection_status"] = "Connected"
-            
-            # Try to list collections to verify connectivity
             try:
                 collections = db.list_collection_names()
-                response["collections"] = collections[:10]  # Show first 10 collections
+                response["collections"] = collections[:10]
                 response["database"] = "✅ Connected & Working"
             except Exception as e:
-                response["database"] = f"⚠️  Connected but Error: {str(e)[:50]}"
+                response["database"] = f"⚠️ Connected but Error: {str(e)[:50]}"
         else:
-            response["database"] = "⚠️  Available but not initialized"
-            
-    except ImportError:
-        response["database"] = "❌ Database module not found (run enable-database first)"
+            response["database"] = "⚠️ Available but not initialized"
     except Exception as e:
         response["database"] = f"❌ Error: {str(e)[:50]}"
-    
-    # Check environment variables
-    import os
-    response["database_url"] = "✅ Set" if os.getenv("DATABASE_URL") else "❌ Not Set"
-    response["database_name"] = "✅ Set" if os.getenv("DATABASE_NAME") else "❌ Not Set"
-    
+
     return response
 
 
 if __name__ == "__main__":
     import uvicorn
+
     port = int(os.getenv("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)
